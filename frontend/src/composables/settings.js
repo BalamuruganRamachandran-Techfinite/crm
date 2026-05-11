@@ -29,3 +29,6 @@ export const showSettings = ref(false)
 export const disableSettingModalOutsideClick = ref(false)
 
 export const activeSettingsPage = ref('')
+
+
+import { freepbxEnabled } from '@/composables/settings'
