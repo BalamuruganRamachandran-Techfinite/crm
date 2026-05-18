@@ -720,17 +720,26 @@ function _onCallFailed(e) {
 }
 
 function _attachRemoteAudio(session) {
+  // Reset audio output to OS default at the start of every call. Without this,
+  // a sticky setSinkId() from a previous call's speaker toggle keeps the audio
+  // pinned to that device — so plugging in headphones mid-call (or starting a
+  // new call with headphones already connected) doesn't actually route to them.
+  _resetAudioOutputToDefault()
   speakerOn.value = false
 
   const wirePeerConnection = (pc) => {
     if (!pc) return
 
-    pc.addEventListener('addstream', (e) => {
-      if (remoteAudio.value) remoteAudio.value.srcObject = e.stream
-    })
-    pc.addEventListener('track', (e) => {
-      if (remoteAudio.value && e.streams?.[0]) remoteAudio.value.srcObject = e.streams[0]
-    })
+    const onRemoteStream = (stream) => {
+      if (!remoteAudio.value || !stream) return
+      remoteAudio.value.srcObject = stream
+      // Re-confirm default sink after the stream is attached; some browsers
+      // reset routing when srcObject changes.
+      _resetAudioOutputToDefault()
+    }
+
+    pc.addEventListener('addstream', (e) => onRemoteStream(e.stream))
+    pc.addEventListener('track', (e) => onRemoteStream(e.streams?.[0]))
 
     // Fallback: if ICE drops and stays dropped for >5s, force the call to end
     // even when no SIP BYE arrives (flaky WSS, NAT timeouts, etc.).
@@ -775,15 +784,22 @@ function hangUp() {
   ringtone.stop()
   const elapsed = _getElapsedSeconds()
   if (currentSession) {
-    // Just call terminate() and let JsSIP handle the SIP teardown and the
-    // PeerConnection close. The session's 'ended' event handler will fire
-    // _onCallEnded which releases media tracks. Calling pc.close() ourselves
-    // here was racing with JsSIP's own teardown and breaking BYE delivery.
+    // SIP-level hangup. May silently no-op in certain edge states (session
+    // already ending, transport dropped, etc.).
     try {
       currentSession.terminate()
     } catch (err) {
       console.warn('[FreePBX] terminate threw:', err)
     }
+    // Release all media (PC senders + our local stream if any) before closing
+    // the peer connection. pc.close() doesn't stop the MediaStreamTrack
+    // objects — the mic stays "active" otherwise.
+    _releaseLocalMedia()
+    try {
+      const pc = currentSession.connection
+      if (pc && pc.signalingState !== 'closed') pc.close()
+    } catch (_) {}
+    currentSession = null
   }
   callStatus.value = 'Call ended'
   counterUp.value.stop()
