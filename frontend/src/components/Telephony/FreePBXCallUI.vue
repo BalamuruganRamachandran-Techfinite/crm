@@ -566,10 +566,13 @@ function acceptIncoming() {
   // Voice-comm flags (echoCancellation, noiseSuppression, autoGainControl) tell the
   // OS this is a phone call — iOS/Android use that signal to route audio through
   // the earpiece instead of the loudspeaker.
+  // `ideal` (not mandatory): on desktop / older audio drivers some of these
+  // may not be supported, and mandatory constraints reject with
+  // OverconstrainedError. Ideal lets the browser pick the best available.
   const audioConstraints = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
+    echoCancellation: { ideal: true },
+    noiseSuppression: { ideal: true },
+    autoGainControl: { ideal: true },
   }
   navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
     .then((stream) => {
@@ -627,10 +630,13 @@ function makeOutgoingCall(number) {
   // Place the WebRTC call via JsSIP. Acquire the mic stream ourselves with
   // voice-comm constraints so iOS classifies this as a voice call and routes
   // the remote audio through the earpiece instead of the loudspeaker.
+  // `ideal` (not mandatory): on desktop / older audio drivers some of these
+  // may not be supported, and mandatory constraints reject with
+  // OverconstrainedError. Ideal lets the browser pick the best available.
   const audioConstraints = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
+    echoCancellation: { ideal: true },
+    noiseSuppression: { ideal: true },
+    autoGainControl: { ideal: true },
   }
   let session
   navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
@@ -701,6 +707,21 @@ function _onCallEnded() {
   counterUp.value.stop()
   callDuration.value = counterUp.value.getTime(0)
   callStatus.value = 'Call ended'
+  // Release the mic tracks. When we hand JsSIP a mediaStream we own, it
+  // won't stop the tracks itself on session end — the mic indicator would
+  // stay lit and the user would think the call is still active.
+  if (currentSession) {
+    try {
+      const pc = currentSession.connection
+      if (pc) {
+        pc.getSenders().forEach((s) => {
+          if (s.track) {
+            try { s.track.stop() } catch (_) {}
+          }
+        })
+      }
+    } catch (_) {}
+  }
   currentSession = null
   speakerOn.value = false
 }
@@ -776,11 +797,28 @@ function hangUp() {
   ringtone.stop()
   const elapsed = _getElapsedSeconds()
   if (currentSession) {
+    // SIP-level hangup. May silently no-op in certain edge states (session
+    // already ending, transport dropped, etc.).
     try {
       currentSession.terminate()
-    } catch (_) {
-      // already ended
+    } catch (err) {
+      console.warn('[FreePBX] terminate threw:', err)
     }
+    // Defensive: force-close the RTCPeerConnection and stop the local mic
+    // tracks even if SIP terminate didn't fire a BYE. pc.close() doesn't
+    // stop the MediaStreamTrack objects — the mic stays "active" otherwise
+    // and the call isn't really hung up from the user's perspective.
+    try {
+      const pc = currentSession.connection
+      if (pc) {
+        pc.getSenders().forEach((s) => {
+          if (s.track) {
+            try { s.track.stop() } catch (_) {}
+          }
+        })
+        if (pc.signalingState !== 'closed') pc.close()
+      }
+    } catch (_) {}
     currentSession = null
   }
   callStatus.value = 'Call ended'
