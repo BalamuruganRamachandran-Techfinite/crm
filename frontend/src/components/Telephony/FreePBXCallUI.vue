@@ -572,51 +572,19 @@ function getIceServers() {
 
 function acceptIncoming() {
   if (!currentSession) return
-
-  // Desktop: let JsSIP acquire the mic internally — the original well-tested
-  // path. No need for the voice-comm-stream trick because desktops route
-  // audio through speakers/headphones the normal way.
-  if (!_isMobileDevice()) {
-    ringtone.stop()
-    try {
-      currentSession.answer({
-        mediaConstraints: { audio: true, video: false },
-        pcConfig: { iceServers: getIceServers() },
-      })
-    } catch (err) {
-      console.error('[FreePBX] answer() failed:', err)
-      toast.error(__('Failed to answer call: {0}', [err.message]))
-      return
-    }
-    _attachRemoteAudio(currentSession)
-    callStatus.value = 'Connecting...'
+  ringtone.stop()
+  try {
+    currentSession.answer({
+      mediaConstraints: { audio: true, video: false },
+      pcConfig: { iceServers: getIceServers() },
+    })
+  } catch (err) {
+    console.error('[FreePBX] answer() failed:', err)
+    toast.error(__('Failed to answer call: {0}', [err.message]))
     return
   }
-
-  // Mobile path: acquire the mic ourselves with voice-comm hints and hand the
-  // stream to JsSIP. iOS routes WebRTC audio to the earpiece only when it sees
-  // a continuous getUserMedia session — any gap between two getUserMedia
-  // calls makes iOS revert to loudspeaker.
-  const audioConstraints = {
-    echoCancellation: { ideal: true },
-    noiseSuppression: { ideal: true },
-    autoGainControl: { ideal: true },
-  }
-  navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
-    .then((stream) => {
-      localStream = stream
-      ringtone.stop()
-      currentSession.answer({
-        mediaStream: stream,
-        pcConfig: { iceServers: getIceServers() },
-      })
-      _attachRemoteAudio(currentSession)
-      callStatus.value = 'Connecting...'
-    })
-    .catch((err) => {
-      console.error('[FreePBX] Microphone access denied:', err)
-      toast.error(__('Microphone access denied. Please allow microphone and try again.'))
-    })
+  _attachRemoteAudio(currentSession)
+  callStatus.value = 'Connecting...'
 }
 
 function makeOutgoingCall(number) {
@@ -652,55 +620,23 @@ function makeOutgoingCall(number) {
     },
   })
 
-  // Desktop: original working path. JsSIP acquires the mic internally.
-  if (!_isMobileDevice()) {
-    try {
-      const session = ua.call(`sip:${number}@${_getSipDomain()}`, {
-        mediaConstraints: { audio: true, video: false },
-        pcConfig: { iceServers: getIceServers() },
-      })
-      console.log('[FreePBX] Session created:', session)
-      _wireOutgoingSessionHandlers(session)
-    } catch (e) {
-      console.error('[FreePBX] ua.call() failed:', e)
-      toast.error(__('Failed to start call: {0}', [e.message]))
-      callStatus.value = ''
-      showCallPopup.value = false
-    }
-    return
-  }
-
-  // Mobile path: acquire the mic ourselves with voice-comm constraints so iOS
-  // classifies this as a voice call and routes the remote audio through the
-  // earpiece instead of the loudspeaker.
-  const audioConstraints = {
-    echoCancellation: { ideal: true },
-    noiseSuppression: { ideal: true },
-    autoGainControl: { ideal: true },
-  }
-  navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
-    .then((stream) => {
-      localStream = stream
-      try {
-        const session = ua.call(`sip:${number}@${_getSipDomain()}`, {
-          mediaStream: stream,
-          pcConfig: { iceServers: getIceServers() },
-        })
-        console.log('[FreePBX] Session created:', session)
-        _wireOutgoingSessionHandlers(session)
-      } catch (e) {
-        console.error('[FreePBX] ua.call() failed:', e)
-        toast.error(__('Failed to start call: {0}', [e.message]))
-        callStatus.value = ''
-        showCallPopup.value = false
-      }
+  // Place the WebRTC call via JsSIP. Use the simple, well-tested mediaConstraints
+  // path on both desktop and mobile. Browser-level earpiece routing on mobile is
+  // not reliably controllable from JS — for guaranteed earpiece on mobile, wrap
+  // the app with Capacitor.
+  try {
+    const session = ua.call(`sip:${number}@${_getSipDomain()}`, {
+      mediaConstraints: { audio: true, video: false },
+      pcConfig: { iceServers: getIceServers() },
     })
-    .catch((err) => {
-      console.error('[FreePBX] Microphone access denied:', err)
-      toast.error(__('Microphone access denied. Please allow microphone and try again.'))
-      callStatus.value = ''
-      showCallPopup.value = false
-    })
+    console.log('[FreePBX] Session created:', session)
+    _wireOutgoingSessionHandlers(session)
+  } catch (e) {
+    console.error('[FreePBX] ua.call() failed:', e)
+    toast.error(__('Failed to start call: {0}', [e.message]))
+    callStatus.value = ''
+    showCallPopup.value = false
+  }
 }
 
 function _wireOutgoingSessionHandlers(session) {
