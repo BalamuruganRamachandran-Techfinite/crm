@@ -174,6 +174,12 @@ def _build_ice_servers(settings):
 	servers = []
 	if settings.stun_server_url:
 		servers.append({"urls": settings.stun_server_url})
+	# Google STUN as a fast public fallback. ICE gathers candidates from all
+	# configured servers in parallel and uses whichever responds first — this
+	# avoids long delays when the admin-configured STUN host is slow to respond
+	# (e.g. when clients are on the same LAN as the FreePBX server and the
+	# router's NAT hairpinning is unreliable).
+	servers.append({"urls": "stun:stun.l.google.com:19302"})
 	if settings.turn_server_url and settings.turn_username:
 		settings_doc = frappe.get_doc("CRM FreePBX Settings")
 		turn_password = settings_doc.get_password("turn_password", raise_exception=False)
