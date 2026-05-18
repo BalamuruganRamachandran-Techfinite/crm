@@ -1,10 +1,7 @@
 <template>
   <div>
-    <!-- Hidden audio element for WebRTC audio output.
-         `playsinline` (both modern and legacy attribute names) is the critical
-         bit on iOS: without it, Safari refuses to start the audio element
-         in-page and routes audio to the loudspeaker. -->
-    <audio ref="remoteAudio" autoplay playsinline webkit-playsinline></audio>
+    <!-- Hidden audio element for WebRTC audio output -->
+    <audio ref="remoteAudio" autoplay></audio>
 
     <div
       v-show="showSmallCallPopup"
@@ -46,21 +43,13 @@
 
     <div
       v-show="showCallPopup"
-      :class="[
-        'z-20 flex flex-col gap-3 bg-surface-gray-7 text-ink-gray-2 shadow-2xl',
-        isMobile
-          ? 'fixed inset-x-0 bottom-0 w-full rounded-t-2xl p-5 pt-3 min-h-[60vh]'
-          : 'fixed w-[280px] min-h-44 rounded-lg p-4 pt-2.5'
-      ]"
-      :style="popupStyle"
+      class="fixed z-20 w-[280px] min-h-44 flex gap-2 flex-col rounded-lg bg-surface-gray-7 p-4 pt-2.5 text-ink-gray-2 shadow-2xl"
+      :style="style"
       @click.stop
     >
       <div
         ref="callPopupHeader"
-        :class="[
-          'header flex items-center justify-between gap-1 text-base select-none',
-          isMobile ? '' : 'cursor-move'
-        ]"
+        class="header flex items-center justify-between gap-1 text-base cursor-move select-none"
       >
         <div class="flex gap-2 items-center truncate">
           <div
@@ -193,43 +182,22 @@
         </div>
       </div>
 
-      <div
-        :class="[
-          'footer flex gap-2',
-          isMobile ? 'flex-col items-stretch mt-auto pb-4' : 'justify-between'
-        ]"
-      >
-        <div
-          :class="[
-            'flex gap-2',
-            isMobile ? 'justify-center flex-wrap' : ''
-          ]"
-        >
+      <div class="footer flex justify-between gap-2">
+        <div class="flex gap-2">
           <!-- Mute toggle -->
           <Button
             v-if="callStatus == 'In progress'"
             class="bg-surface-gray-6 text-ink-white hover:bg-surface-gray-5"
             :tooltip="isMuted ? __('Unmute') : __('Mute')"
-            :size="isMobile ? 'xl' : 'md'"
+            size="md"
             :icon="isMuted ? MicOffIcon : MicIcon"
             @click="toggleMute"
-          />
-          <!-- Speakerphone toggle (only shown when the browser actually
-               supports HTMLMediaElement.setSinkId — i.e. desktop/Android Chrome.
-               iOS Safari decides audio routing automatically and gives no API). -->
-          <Button
-            v-if="callStatus == 'In progress' && canSwitchAudioOutput"
-            class="bg-surface-gray-6 text-ink-white hover:bg-surface-gray-5"
-            :tooltip="speakerOn ? __('Earpiece') : __('Speaker')"
-            :size="isMobile ? 'xl' : 'md'"
-            :icon="speakerOn ? 'volume-2' : 'volume-1'"
-            @click="toggleSpeaker"
           />
           <!-- Hang up -->
           <Button
             v-if="callStatus != 'Call ended' && callStatus != 'No answer' && callStatus != ''"
             :tooltip="__('Hang Up')"
-            :size="isMobile ? 'xl' : 'md'"
+            size="md"
             icon="phone-off"
             style="background-color: #dc2626; color: white;"
             @click="hangUp"
@@ -238,7 +206,7 @@
           <Button
             v-if="callStatus == 'Incoming call'"
             :tooltip="__('Accept')"
-            :size="isMobile ? 'xl' : 'md'"
+            size="md"
             icon="phone"
             style="background-color: #16a34a; color: white;"
             @click="acceptIncoming"
@@ -303,10 +271,9 @@ import TaskPanel from '@/components/Telephony/TaskPanel.vue'
 import CountUpTimer from '@/components/CountUpTimer.vue'
 import { useDraggable, useWindowSize } from '@vueuse/core'
 import { TextEditor, Avatar, Button, createResource, toast } from 'frappe-ui'
-import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as JsSIP from 'jssip'
-import * as ringtone from '@/components/Telephony/ringtone'
 
 const MicIcon = 'mic'
 const MicOffIcon = 'mic-off'
@@ -322,19 +289,9 @@ function toggleCallPopup() {
 }
 
 const { width, height } = useWindowSize()
-const isMobile = computed(() => width.value < 640)
-const { style: dragStyle } = useDraggable(callPopupHeader, {
+const { style } = useDraggable(callPopupHeader, {
   initialValue: { x: width.value - 350, y: height.value - 250 },
   preventDefault: true,
-})
-// On mobile, ignore the draggable position and let CSS handle full-width
-// bottom-sheet layout. On desktop, use the draggable's inline style.
-const popupStyle = computed(() => (isMobile.value ? {} : dragStyle.value))
-
-onMounted(() => {
-  // Pre-arm the audio context so the ringtone can play when an incoming call
-  // arrives later (mobile browsers block audio without a prior user gesture).
-  ringtone.prime()
 })
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -344,12 +301,6 @@ const phoneNumber = ref('')
 const callData = ref(null)
 const callDuration = ref('00:00')
 const isMuted = ref(false)
-const speakerOn = ref(false)
-const canSwitchAudioOutput = ref(
-  typeof window !== 'undefined' &&
-  typeof HTMLMediaElement !== 'undefined' &&
-  typeof HTMLMediaElement.prototype.setSinkId === 'function'
-)
 const counterUp = ref(null)
 // Holds the latest status update if it arrives before the call log is created.
 // Flushed in make_a_call's onSuccess so we never silently drop a terminal status.
@@ -359,17 +310,6 @@ let ua = null            // JsSIP UserAgent
 let currentSession = null  // active RTCSession
 let sipDomain = null     // FreePBX host IP, set when credentials are loaded
 let iceServers = []      // ICE config from CRM FreePBX Settings, set when credentials are loaded
-let localStream = null   // MediaStream we acquired ourselves (mobile path only)
-
-// True on iOS / Android, where we must hand JsSIP a pre-acquired mediaStream
-// to get earpiece routing. On desktop this is harmful: it changes the JsSIP
-// code path and the constraints can cause OverconstrainedError on some
-// audio drivers. Use a runtime check rather than the responsive `isMobile`
-// (which is about layout) so tablets in landscape still get the right path.
-function _isMobileDevice() {
-  if (typeof navigator === 'undefined') return false
-  return /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent || '')
-}
 
 const contact = ref({ full_name: '', image: '', mobile_no: '' })
 
@@ -526,7 +466,6 @@ function _handleIncomingSession(session, request) {
   callStatus.value = 'Incoming call'
   showCallPopup.value = true
   showSmallCallPopup.value = false
-  ringtone.startRinging()
 
   // Create a call log for the incoming call
   createResource({
@@ -545,20 +484,17 @@ function _handleIncomingSession(session, request) {
 
   session.on('ended', (e) => {
     console.log('[FreePBX] incoming ended', e)
-    ringtone.stop()
     const elapsed = _getElapsedSeconds()
     _onCallEnded()
     _updateCallLogStatus('completed', elapsed)
   })
   session.on('failed', (e) => {
     console.log('[FreePBX] incoming failed', e.cause)
-    ringtone.stop()
     _onCallFailed(e)
     _updateCallLogStatus('canceled')
   })
   session.on('confirmed', (e) => {
     console.log('[FreePBX] incoming confirmed', e)
-    ringtone.stop()
     _onCallConfirmed()
     _updateCallLogStatus('in-progress')
   })
@@ -572,38 +508,25 @@ function getIceServers() {
 
 function acceptIncoming() {
   if (!currentSession) return
-  ringtone.stop()
-  try {
-    currentSession.answer({
-      mediaConstraints: { audio: true, video: false },
-      pcConfig: { iceServers: getIceServers() },
+
+  // Request microphone permission first, then answer
+  navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    .then((stream) => {
+      stream.getTracks().forEach(t => t.stop()) // release — JsSIP will re-acquire
+      currentSession.answer({
+        mediaConstraints: { audio: true, video: false },
+        pcConfig: { iceServers: getIceServers() },
+      })
+      _attachRemoteAudio(currentSession)
+      callStatus.value = 'Connecting...'
     })
-  } catch (err) {
-    console.error('[FreePBX] answer() failed:', err)
-    toast.error(__('Failed to answer call: {0}', [err.message]))
-    return
-  }
-  _attachRemoteAudio(currentSession)
-  callStatus.value = 'Connecting...'
+    .catch((err) => {
+      console.error('[FreePBX] Microphone access denied:', err)
+      toast.error(__('Microphone access denied. Please allow microphone and try again.'))
+    })
 }
 
 function makeOutgoingCall(number) {
-  // Defensive: clear any stale session reference that wasn't cleaned up by the
-  // previous call's lifecycle events. Without this, a leftover currentSession
-  // can confuse the second-call flow.
-  if (currentSession) {
-    console.warn('[FreePBX] Stale session found at call start, clearing:', currentSession)
-    try { currentSession.terminate() } catch (_) {}
-    currentSession = null
-  }
-
-  console.log('[FreePBX] makeOutgoingCall', {
-    number,
-    uaExists: !!ua,
-    isRegistered: ua?.isRegistered?.(),
-    isConnected: ua?.isConnected?.(),
-  })
-
   if (!ua || !ua.isRegistered()) {
     toast.error(__('FreePBX SIP not registered yet. Please wait a moment.'))
     return
@@ -636,44 +559,36 @@ function makeOutgoingCall(number) {
     },
   })
 
-  // Place the WebRTC call via JsSIP. Use the simple, well-tested mediaConstraints
-  // path on both desktop and mobile. Browser-level earpiece routing on mobile is
-  // not reliably controllable from JS — for guaranteed earpiece on mobile, wrap
-  // the app with Capacitor.
+  // Place the WebRTC call via JsSIP
+  let session
   try {
-    const session = ua.call(`sip:${number}@${_getSipDomain()}`, {
+    session = ua.call(`sip:${number}@${_getSipDomain()}`, {
       mediaConstraints: { audio: true, video: false },
       pcConfig: { iceServers: getIceServers() },
     })
     console.log('[FreePBX] Session created:', session)
-    _wireOutgoingSessionHandlers(session)
   } catch (e) {
     console.error('[FreePBX] ua.call() failed:', e)
     toast.error(__('Failed to start call: {0}', [e.message]))
     callStatus.value = ''
     showCallPopup.value = false
+    return
   }
-}
 
-function _wireOutgoingSessionHandlers(session) {
   currentSession = session
 
   session.on('progress', (e) => {
     console.log('[FreePBX] progress', e)
     callStatus.value = 'Ringing...'
-    // No local ringback — FreePBX sends ringback through the RTP stream as
-    // early media (183 Session Progress). Playing a local tone overlaps it.
     _updateCallLogStatus('ringing')
   })
   session.on('confirmed', (e) => {
     console.log('[FreePBX] confirmed', e)
-    ringtone.stop()
     _onCallConfirmed()
     _updateCallLogStatus('in-progress')
   })
   session.on('ended', (e) => {
     console.log('[FreePBX] ended', e)
-    ringtone.stop()
     // Capture duration before stop() resets the timer
     const elapsed = _getElapsedSeconds()
     _onCallEnded()
@@ -681,7 +596,6 @@ function _wireOutgoingSessionHandlers(session) {
   })
   session.on('failed', (e) => {
     console.log('[FreePBX] failed', e.cause, e)
-    ringtone.stop()
     _onCallFailed(e)
     const failStatus = e.cause === 'Rejected' || e.cause === 'Busy' ? 'busy' : 'no-answer'
     _updateCallLogStatus(failStatus)
@@ -699,13 +613,7 @@ function _onCallEnded() {
   counterUp.value.stop()
   callDuration.value = counterUp.value.getTime(0)
   callStatus.value = 'Call ended'
-  // JsSIP acquired the stream itself (we use mediaConstraints, not mediaStream)
-  // and tears it down as part of its own end-of-session cleanup. Don't touch
-  // pc.getSenders() or pc.close() here — racing JsSIP's teardown left the UA
-  // in a broken state for the next call attempt (second call would hang at
-  // "Calling..." because the UA never sent INVITE).
   currentSession = null
-  speakerOn.value = false
 }
 
 function _onCallFailed(e) {
@@ -715,26 +623,15 @@ function _onCallFailed(e) {
 }
 
 function _attachRemoteAudio(session) {
-  // Reset audio output to OS default at the start of every call. Without this,
-  // a sticky setSinkId() from a previous call's speaker toggle keeps the audio
-  // pinned to that device — so plugging in headphones mid-call (or starting a
-  // new call with headphones already connected) doesn't actually route to them.
-  _resetAudioOutputToDefault()
-  speakerOn.value = false
-
   const wirePeerConnection = (pc) => {
     if (!pc) return
 
-    const onRemoteStream = (stream) => {
-      if (!remoteAudio.value || !stream) return
-      remoteAudio.value.srcObject = stream
-      // Re-confirm default sink after the stream is attached; some browsers
-      // reset routing when srcObject changes.
-      _resetAudioOutputToDefault()
-    }
-
-    pc.addEventListener('addstream', (e) => onRemoteStream(e.stream))
-    pc.addEventListener('track', (e) => onRemoteStream(e.streams?.[0]))
+    pc.addEventListener('addstream', (e) => {
+      if (remoteAudio.value) remoteAudio.value.srcObject = e.stream
+    })
+    pc.addEventListener('track', (e) => {
+      if (remoteAudio.value && e.streams?.[0]) remoteAudio.value.srcObject = e.streams[0]
+    })
 
     // Fallback: if ICE drops and stays dropped for >5s, force the call to end
     // even when no SIP BYE arrives (flaky WSS, NAT timeouts, etc.).
@@ -776,18 +673,14 @@ function _attachRemoteAudio(session) {
 }
 
 function hangUp() {
-  ringtone.stop()
   const elapsed = _getElapsedSeconds()
   if (currentSession) {
-    // SIP-level hangup. JsSIP fires the 'ended' event which runs _onCallEnded,
-    // which nulls currentSession. We don't touch the PeerConnection or its
-    // senders here — JsSIP handles that as part of its own teardown, and
-    // interfering races with JsSIP and breaks subsequent calls.
     try {
       currentSession.terminate()
-    } catch (err) {
-      console.warn('[FreePBX] terminate threw:', err)
+    } catch (_) {
+      // already ended
     }
+    currentSession = null
   }
   callStatus.value = 'Call ended'
   counterUp.value.stop()
@@ -803,80 +696,6 @@ function toggleMute() {
     currentSession.mute({ audio: true })
   }
   isMuted.value = !isMuted.value
-}
-
-// Cache enumerated audio output devices so we don't re-query on every toggle.
-let _audioOutputs = null
-async function _getAudioOutputs() {
-  if (_audioOutputs) return _audioOutputs
-  if (!navigator.mediaDevices?.enumerateDevices) return []
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices()
-    _audioOutputs = devices.filter((d) => d.kind === 'audiooutput')
-    return _audioOutputs
-  } catch (err) {
-    console.warn('[FreePBX] enumerateDevices failed', err)
-    return []
-  }
-}
-
-function _resetAudioOutputToDefault() {
-  const audio = remoteAudio.value
-  if (!audio || typeof audio.setSinkId !== 'function') return
-  // Empty string means "follow the OS default output" — so plugging in
-  // headphones or Bluetooth routes audio there automatically.
-  audio.setSinkId('').catch((err) => {
-    console.warn('[FreePBX] could not reset sink to default', err)
-  })
-}
-
-// When the OS audio devices change (headphone plug/unplug, Bluetooth pair/
-// disconnect), follow that change instead of staying on a stale pinned device.
-if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
-  navigator.mediaDevices.addEventListener('devicechange', () => {
-    _audioOutputs = null  // invalidate cache
-    // If user hasn't explicitly engaged speakerphone, follow OS default.
-    if (!speakerOn.value) _resetAudioOutputToDefault()
-  })
-}
-
-async function toggleSpeaker() {
-  const audio = remoteAudio.value
-  if (!audio) return
-  const next = !speakerOn.value
-
-  // iOS Safari: setSinkId doesn't exist. There is no public web API to switch
-  // between earpiece and speaker — the OS decides. Tell the user.
-  if (typeof audio.setSinkId !== 'function') {
-    toast.warning(__('Audio output switching is not supported in this browser. Use device speaker controls.'))
-    return
-  }
-
-  // Speaker OFF → follow OS default. This is what makes wired headphones,
-  // Bluetooth, and the receiver/earpiece work automatically.
-  if (!next) {
-    _resetAudioOutputToDefault()
-    speakerOn.value = false
-    return
-  }
-
-  // Speaker ON → force the loudspeaker device explicitly (overriding any
-  // headphone/earpiece the OS would otherwise prefer).
-  const outputs = await _getAudioOutputs()
-  if (outputs.length === 0) {
-    toast.warning(__('No audio output devices found. Microphone permission may be required.'))
-    return
-  }
-  const speakerDev = outputs.find((d) => /speaker|loudspeaker/i.test(d.label || '')) || outputs[0]
-  try {
-    await audio.setSinkId(speakerDev.deviceId)
-    audio.volume = 1.0
-    speakerOn.value = true
-    console.log('[FreePBX] Audio output forced to', speakerDev.label || speakerDev.deviceId)
-  } catch (err) {
-    console.warn('[FreePBX] setSinkId failed', err)
-    toast.error(__('Could not switch to speaker: {0}', [err.message || err.name]))
-  }
 }
 
 function _getElapsedSeconds() {
