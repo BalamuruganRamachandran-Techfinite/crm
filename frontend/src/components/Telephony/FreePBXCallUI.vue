@@ -588,6 +588,22 @@ function acceptIncoming() {
 }
 
 function makeOutgoingCall(number) {
+  // Defensive: clear any stale session reference that wasn't cleaned up by the
+  // previous call's lifecycle events. Without this, a leftover currentSession
+  // can confuse the second-call flow.
+  if (currentSession) {
+    console.warn('[FreePBX] Stale session found at call start, clearing:', currentSession)
+    try { currentSession.terminate() } catch (_) {}
+    currentSession = null
+  }
+
+  console.log('[FreePBX] makeOutgoingCall', {
+    number,
+    uaExists: !!ua,
+    isRegistered: ua?.isRegistered?.(),
+    isConnected: ua?.isConnected?.(),
+  })
+
   if (!ua || !ua.isRegistered()) {
     toast.error(__('FreePBX SIP not registered yet. Please wait a moment.'))
     return
@@ -679,36 +695,15 @@ function _onCallConfirmed() {
   callStatus.value = 'In progress'
 }
 
-function _releaseLocalMedia() {
-  // Stop the stream we acquired ourselves (mobile path). JsSIP doesn't stop
-  // it on session end because we passed it via the mediaStream option.
-  if (localStream) {
-    try {
-      localStream.getTracks().forEach((t) => { try { t.stop() } catch (_) {} })
-    } catch (_) {}
-    localStream = null
-  }
-  // Stop tracks attached to the peer connection (covers the desktop path
-  // where JsSIP acquired its own stream — we don't have a reference to it).
-  if (currentSession) {
-    try {
-      const pc = currentSession.connection
-      if (pc) {
-        pc.getSenders().forEach((s) => {
-          if (s.track) {
-            try { s.track.stop() } catch (_) {}
-          }
-        })
-      }
-    } catch (_) {}
-  }
-}
-
 function _onCallEnded() {
   counterUp.value.stop()
   callDuration.value = counterUp.value.getTime(0)
   callStatus.value = 'Call ended'
-  _releaseLocalMedia()
+  // JsSIP acquired the stream itself (we use mediaConstraints, not mediaStream)
+  // and tears it down as part of its own end-of-session cleanup. Don't touch
+  // pc.getSenders() or pc.close() here — racing JsSIP's teardown left the UA
+  // in a broken state for the next call attempt (second call would hang at
+  // "Calling..." because the UA never sent INVITE).
   currentSession = null
   speakerOn.value = false
 }
