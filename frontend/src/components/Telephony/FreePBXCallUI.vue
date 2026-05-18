@@ -712,15 +712,26 @@ function _onCallFailed(e) {
 }
 
 function _attachRemoteAudio(session) {
+  // Reset audio output to OS default at the start of every call. Without this,
+  // a sticky setSinkId() from a previous call's speaker toggle keeps the audio
+  // pinned to that device — so plugging in headphones mid-call (or starting a
+  // new call with headphones already connected) doesn't actually route to them.
+  _resetAudioOutputToDefault()
+  speakerOn.value = false
+
   const wirePeerConnection = (pc) => {
     if (!pc) return
 
-    pc.addEventListener('addstream', (e) => {
-      if (remoteAudio.value) remoteAudio.value.srcObject = e.stream
-    })
-    pc.addEventListener('track', (e) => {
-      if (remoteAudio.value && e.streams?.[0]) remoteAudio.value.srcObject = e.streams[0]
-    })
+    const onRemoteStream = (stream) => {
+      if (!remoteAudio.value || !stream) return
+      remoteAudio.value.srcObject = stream
+      // Re-confirm default sink after the stream is attached; some browsers
+      // reset routing when srcObject changes.
+      _resetAudioOutputToDefault()
+    }
+
+    pc.addEventListener('addstream', (e) => onRemoteStream(e.stream))
+    pc.addEventListener('track', (e) => onRemoteStream(e.streams?.[0]))
 
     // Fallback: if ICE drops and stays dropped for >5s, force the call to end
     // even when no SIP BYE arrives (flaky WSS, NAT timeouts, etc.).
@@ -803,6 +814,26 @@ async function _getAudioOutputs() {
   }
 }
 
+function _resetAudioOutputToDefault() {
+  const audio = remoteAudio.value
+  if (!audio || typeof audio.setSinkId !== 'function') return
+  // Empty string means "follow the OS default output" — so plugging in
+  // headphones or Bluetooth routes audio there automatically.
+  audio.setSinkId('').catch((err) => {
+    console.warn('[FreePBX] could not reset sink to default', err)
+  })
+}
+
+// When the OS audio devices change (headphone plug/unplug, Bluetooth pair/
+// disconnect), follow that change instead of staying on a stale pinned device.
+if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    _audioOutputs = null  // invalidate cache
+    // If user hasn't explicitly engaged speakerphone, follow OS default.
+    if (!speakerOn.value) _resetAudioOutputToDefault()
+  })
+}
+
 async function toggleSpeaker() {
   const audio = remoteAudio.value
   if (!audio) return
@@ -815,28 +846,30 @@ async function toggleSpeaker() {
     return
   }
 
+  // Speaker OFF → follow OS default. This is what makes wired headphones,
+  // Bluetooth, and the receiver/earpiece work automatically.
+  if (!next) {
+    _resetAudioOutputToDefault()
+    speakerOn.value = false
+    return
+  }
+
+  // Speaker ON → force the loudspeaker device explicitly (overriding any
+  // headphone/earpiece the OS would otherwise prefer).
   const outputs = await _getAudioOutputs()
   if (outputs.length === 0) {
     toast.warning(__('No audio output devices found. Microphone permission may be required.'))
     return
   }
-
-  // Heuristic: speaker devices usually contain "speaker" in their label,
-  // earpiece devices contain "earpiece" / "communications". Fall back to the
-  // first/default device.
-  const findLabel = (re) => outputs.find((d) => re.test(d.label || ''))
-  const speakerDev = findLabel(/speaker|loudspeaker/i) || outputs[0]
-  const earpieceDev = findLabel(/earpiece|communications|receiver/i) || outputs.find((d) => d.deviceId === 'default') || outputs[0]
-  const target = next ? speakerDev : earpieceDev
-
+  const speakerDev = outputs.find((d) => /speaker|loudspeaker/i.test(d.label || '')) || outputs[0]
   try {
-    await audio.setSinkId(target.deviceId)
+    await audio.setSinkId(speakerDev.deviceId)
     audio.volume = 1.0
-    speakerOn.value = next
-    console.log('[FreePBX] Audio output switched to', target.label || target.deviceId)
+    speakerOn.value = true
+    console.log('[FreePBX] Audio output forced to', speakerDev.label || speakerDev.deviceId)
   } catch (err) {
     console.warn('[FreePBX] setSinkId failed', err)
-    toast.error(__('Could not switch audio output: {0}', [err.message || err.name]))
+    toast.error(__('Could not switch to speaker: {0}', [err.message || err.name]))
   }
 }
 
