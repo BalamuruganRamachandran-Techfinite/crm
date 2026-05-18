@@ -359,6 +359,17 @@ let ua = null            // JsSIP UserAgent
 let currentSession = null  // active RTCSession
 let sipDomain = null     // FreePBX host IP, set when credentials are loaded
 let iceServers = []      // ICE config from CRM FreePBX Settings, set when credentials are loaded
+let localStream = null   // MediaStream we acquired ourselves (mobile path only)
+
+// True on iOS / Android, where we must hand JsSIP a pre-acquired mediaStream
+// to get earpiece routing. On desktop this is harmful: it changes the JsSIP
+// code path and the constraints can cause OverconstrainedError on some
+// audio drivers. Use a runtime check rather than the responsive `isMobile`
+// (which is about layout) so tablets in landscape still get the right path.
+function _isMobileDevice() {
+  if (typeof navigator === 'undefined') return false
+  return /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent || '')
+}
 
 const contact = ref({ full_name: '', image: '', mobile_no: '' })
 
@@ -562,13 +573,30 @@ function getIceServers() {
 function acceptIncoming() {
   if (!currentSession) return
 
-  // Request microphone permission first, then answer.
-  // Voice-comm flags (echoCancellation, noiseSuppression, autoGainControl) tell the
-  // OS this is a phone call — iOS/Android use that signal to route audio through
-  // the earpiece instead of the loudspeaker.
-  // `ideal` (not mandatory): on desktop / older audio drivers some of these
-  // may not be supported, and mandatory constraints reject with
-  // OverconstrainedError. Ideal lets the browser pick the best available.
+  // Desktop: let JsSIP acquire the mic internally — the original well-tested
+  // path. No need for the voice-comm-stream trick because desktops route
+  // audio through speakers/headphones the normal way.
+  if (!_isMobileDevice()) {
+    ringtone.stop()
+    try {
+      currentSession.answer({
+        mediaConstraints: { audio: true, video: false },
+        pcConfig: { iceServers: getIceServers() },
+      })
+    } catch (err) {
+      console.error('[FreePBX] answer() failed:', err)
+      toast.error(__('Failed to answer call: {0}', [err.message]))
+      return
+    }
+    _attachRemoteAudio(currentSession)
+    callStatus.value = 'Connecting...'
+    return
+  }
+
+  // Mobile path: acquire the mic ourselves with voice-comm hints and hand the
+  // stream to JsSIP. iOS routes WebRTC audio to the earpiece only when it sees
+  // a continuous getUserMedia session — any gap between two getUserMedia
+  // calls makes iOS revert to loudspeaker.
   const audioConstraints = {
     echoCancellation: { ideal: true },
     noiseSuppression: { ideal: true },
@@ -576,10 +604,7 @@ function acceptIncoming() {
   }
   navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
     .then((stream) => {
-      // Pass the stream directly to JsSIP rather than releasing and letting it
-      // re-acquire. iOS routes WebRTC audio to the earpiece only when it sees
-      // a continuous getUserMedia session — any gap between two getUserMedia
-      // calls makes iOS revert to loudspeaker.
+      localStream = stream
       ringtone.stop()
       currentSession.answer({
         mediaStream: stream,
@@ -627,22 +652,37 @@ function makeOutgoingCall(number) {
     },
   })
 
-  // Place the WebRTC call via JsSIP. Acquire the mic stream ourselves with
-  // voice-comm constraints so iOS classifies this as a voice call and routes
-  // the remote audio through the earpiece instead of the loudspeaker.
-  // `ideal` (not mandatory): on desktop / older audio drivers some of these
-  // may not be supported, and mandatory constraints reject with
-  // OverconstrainedError. Ideal lets the browser pick the best available.
+  // Desktop: original working path. JsSIP acquires the mic internally.
+  if (!_isMobileDevice()) {
+    try {
+      const session = ua.call(`sip:${number}@${_getSipDomain()}`, {
+        mediaConstraints: { audio: true, video: false },
+        pcConfig: { iceServers: getIceServers() },
+      })
+      console.log('[FreePBX] Session created:', session)
+      _wireOutgoingSessionHandlers(session)
+    } catch (e) {
+      console.error('[FreePBX] ua.call() failed:', e)
+      toast.error(__('Failed to start call: {0}', [e.message]))
+      callStatus.value = ''
+      showCallPopup.value = false
+    }
+    return
+  }
+
+  // Mobile path: acquire the mic ourselves with voice-comm constraints so iOS
+  // classifies this as a voice call and routes the remote audio through the
+  // earpiece instead of the loudspeaker.
   const audioConstraints = {
     echoCancellation: { ideal: true },
     noiseSuppression: { ideal: true },
     autoGainControl: { ideal: true },
   }
-  let session
   navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
     .then((stream) => {
+      localStream = stream
       try {
-        session = ua.call(`sip:${number}@${_getSipDomain()}`, {
+        const session = ua.call(`sip:${number}@${_getSipDomain()}`, {
           mediaStream: stream,
           pcConfig: { iceServers: getIceServers() },
         })
@@ -703,13 +743,17 @@ function _onCallConfirmed() {
   callStatus.value = 'In progress'
 }
 
-function _onCallEnded() {
-  counterUp.value.stop()
-  callDuration.value = counterUp.value.getTime(0)
-  callStatus.value = 'Call ended'
-  // Release the mic tracks. When we hand JsSIP a mediaStream we own, it
-  // won't stop the tracks itself on session end — the mic indicator would
-  // stay lit and the user would think the call is still active.
+function _releaseLocalMedia() {
+  // Stop the stream we acquired ourselves (mobile path). JsSIP doesn't stop
+  // it on session end because we passed it via the mediaStream option.
+  if (localStream) {
+    try {
+      localStream.getTracks().forEach((t) => { try { t.stop() } catch (_) {} })
+    } catch (_) {}
+    localStream = null
+  }
+  // Stop tracks attached to the peer connection (covers the desktop path
+  // where JsSIP acquired its own stream — we don't have a reference to it).
   if (currentSession) {
     try {
       const pc = currentSession.connection
@@ -722,6 +766,13 @@ function _onCallEnded() {
       }
     } catch (_) {}
   }
+}
+
+function _onCallEnded() {
+  counterUp.value.stop()
+  callDuration.value = counterUp.value.getTime(0)
+  callStatus.value = 'Call ended'
+  _releaseLocalMedia()
   currentSession = null
   speakerOn.value = false
 }
@@ -804,20 +855,13 @@ function hangUp() {
     } catch (err) {
       console.warn('[FreePBX] terminate threw:', err)
     }
-    // Defensive: force-close the RTCPeerConnection and stop the local mic
-    // tracks even if SIP terminate didn't fire a BYE. pc.close() doesn't
-    // stop the MediaStreamTrack objects — the mic stays "active" otherwise
-    // and the call isn't really hung up from the user's perspective.
+    // Release all media (PC senders + our local stream if any) before closing
+    // the peer connection. pc.close() doesn't stop the MediaStreamTrack
+    // objects — the mic stays "active" otherwise.
+    _releaseLocalMedia()
     try {
       const pc = currentSession.connection
-      if (pc) {
-        pc.getSenders().forEach((s) => {
-          if (s.track) {
-            try { s.track.stop() } catch (_) {}
-          }
-        })
-        if (pc.signalingState !== 'closed') pc.close()
-      }
+      if (pc && pc.signalingState !== 'closed') pc.close()
     } catch (_) {}
     currentSession = null
   }
