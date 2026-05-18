@@ -779,22 +779,15 @@ function hangUp() {
   ringtone.stop()
   const elapsed = _getElapsedSeconds()
   if (currentSession) {
-    // SIP-level hangup. May silently no-op in certain edge states (session
-    // already ending, transport dropped, etc.).
+    // SIP-level hangup. JsSIP fires the 'ended' event which runs _onCallEnded,
+    // which nulls currentSession. We don't touch the PeerConnection or its
+    // senders here — JsSIP handles that as part of its own teardown, and
+    // interfering races with JsSIP and breaks subsequent calls.
     try {
       currentSession.terminate()
     } catch (err) {
       console.warn('[FreePBX] terminate threw:', err)
     }
-    // Release all media (PC senders + our local stream if any) before closing
-    // the peer connection. pc.close() doesn't stop the MediaStreamTrack
-    // objects — the mic stays "active" otherwise.
-    _releaseLocalMedia()
-    try {
-      const pc = currentSession.connection
-      if (pc && pc.signalingState !== 'closed') pc.close()
-    } catch (_) {}
-    currentSession = null
   }
   callStatus.value = 'Call ended'
   counterUp.value.stop()
