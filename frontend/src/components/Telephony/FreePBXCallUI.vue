@@ -1,9 +1,10 @@
 <template>
   <div>
     <!-- Hidden audio element for WebRTC audio output.
-         `playsinline` is the critical bit on iOS: without it, Safari refuses to
-         start the audio element in-page and routes audio to the loudspeaker. -->
-    <audio ref="remoteAudio" autoplay playsinline></audio>
+         `playsinline` (both modern and legacy attribute names) is the critical
+         bit on iOS: without it, Safari refuses to start the audio element
+         in-page and routes audio to the loudspeaker. -->
+    <audio ref="remoteAudio" autoplay playsinline webkit-playsinline></audio>
 
     <div
       v-show="showSmallCallPopup"
@@ -572,10 +573,13 @@ function acceptIncoming() {
   }
   navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
     .then((stream) => {
-      stream.getTracks().forEach(t => t.stop()) // release — JsSIP will re-acquire
+      // Pass the stream directly to JsSIP rather than releasing and letting it
+      // re-acquire. iOS routes WebRTC audio to the earpiece only when it sees
+      // a continuous getUserMedia session — any gap between two getUserMedia
+      // calls makes iOS revert to loudspeaker.
       ringtone.stop()
       currentSession.answer({
-        mediaConstraints: { audio: audioConstraints, video: false },
+        mediaStream: stream,
         pcConfig: { iceServers: getIceServers() },
       })
       _attachRemoteAudio(currentSession)
@@ -620,25 +624,40 @@ function makeOutgoingCall(number) {
     },
   })
 
-  // Place the WebRTC call via JsSIP
-  let session
-  try {
-    session = ua.call(`sip:${number}@${_getSipDomain()}`, {
-      mediaConstraints: {
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: false,
-      },
-      pcConfig: { iceServers: getIceServers() },
-    })
-    console.log('[FreePBX] Session created:', session)
-  } catch (e) {
-    console.error('[FreePBX] ua.call() failed:', e)
-    toast.error(__('Failed to start call: {0}', [e.message]))
-    callStatus.value = ''
-    showCallPopup.value = false
-    return
+  // Place the WebRTC call via JsSIP. Acquire the mic stream ourselves with
+  // voice-comm constraints so iOS classifies this as a voice call and routes
+  // the remote audio through the earpiece instead of the loudspeaker.
+  const audioConstraints = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
   }
+  let session
+  navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false })
+    .then((stream) => {
+      try {
+        session = ua.call(`sip:${number}@${_getSipDomain()}`, {
+          mediaStream: stream,
+          pcConfig: { iceServers: getIceServers() },
+        })
+        console.log('[FreePBX] Session created:', session)
+        _wireOutgoingSessionHandlers(session)
+      } catch (e) {
+        console.error('[FreePBX] ua.call() failed:', e)
+        toast.error(__('Failed to start call: {0}', [e.message]))
+        callStatus.value = ''
+        showCallPopup.value = false
+      }
+    })
+    .catch((err) => {
+      console.error('[FreePBX] Microphone access denied:', err)
+      toast.error(__('Microphone access denied. Please allow microphone and try again.'))
+      callStatus.value = ''
+      showCallPopup.value = false
+    })
+}
 
+function _wireOutgoingSessionHandlers(session) {
   currentSession = session
 
   session.on('progress', (e) => {
