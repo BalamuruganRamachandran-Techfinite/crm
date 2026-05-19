@@ -274,6 +274,7 @@ import { TextEditor, Avatar, Button, createResource, toast } from 'frappe-ui'
 import { ref, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as JsSIP from 'jssip'
+import * as ringtone from '@/components/Telephony/ringtone'
 
 const MicIcon = 'mic'
 const MicOffIcon = 'mic-off'
@@ -442,8 +443,28 @@ function _initJsSIP(creds) {
     console.log('[FreePBX] SIP registered')
   })
 
+  ua.on('unregistered', (e) => {
+    console.warn('[FreePBX] SIP unregistered', e)
+  })
+
   ua.on('registrationFailed', (e) => {
+    console.warn('[FreePBX] SIP registrationFailed', e)
     toast.error(__('FreePBX SIP registration failed: {0}', [e.cause]))
+  })
+
+  // Transport-level events — useful for diagnosing call cancellation that
+  // looks like our code's fault but is actually JsSIP auto-canceling when
+  // the WebSocket drops mid-call.
+  ua.on('connected', (e) => {
+    console.log('[FreePBX] WSS connected')
+  })
+
+  ua.on('disconnected', (e) => {
+    console.warn('[FreePBX] WSS disconnected', {
+      code: e?.code,
+      reason: e?.reason,
+      error: e?.error,
+    })
   })
 
   // Handle incoming calls
@@ -466,6 +487,7 @@ function _handleIncomingSession(session, request) {
   callStatus.value = 'Incoming call'
   showCallPopup.value = true
   showSmallCallPopup.value = false
+  ringtone.startRinging()
 
   // Create a call log for the incoming call
   createResource({
@@ -484,17 +506,20 @@ function _handleIncomingSession(session, request) {
 
   session.on('ended', (e) => {
     console.log('[FreePBX] incoming ended', e)
+    ringtone.stop()
     const elapsed = _getElapsedSeconds()
     _onCallEnded()
     _updateCallLogStatus('completed', elapsed)
   })
   session.on('failed', (e) => {
     console.log('[FreePBX] incoming failed', e.cause)
+    ringtone.stop()
     _onCallFailed(e)
     _updateCallLogStatus('canceled')
   })
   session.on('confirmed', (e) => {
     console.log('[FreePBX] incoming confirmed', e)
+    ringtone.stop()
     _onCallConfirmed()
     _updateCallLogStatus('in-progress')
   })
@@ -508,6 +533,7 @@ function getIceServers() {
 
 function acceptIncoming() {
   if (!currentSession) return
+  ringtone.stop()
 
   // Request microphone permission first, then answer
   navigator.mediaDevices.getUserMedia({ audio: true, video: false })
@@ -673,6 +699,7 @@ function _attachRemoteAudio(session) {
 }
 
 function hangUp() {
+  ringtone.stop()
   const elapsed = _getElapsedSeconds()
   if (currentSession) {
     try {
